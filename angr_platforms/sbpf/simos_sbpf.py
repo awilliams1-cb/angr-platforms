@@ -192,8 +192,9 @@ class SimSolana(SimUserland):
                             l.debug("No SimProcedure for sBPF symbol: %s", sym_name)
                             continue
 
-                        # Hook the CALL instruction address
-                        call_addr = rel['r_offset'] + main_obj.mapped_base
+                        # Hook the CALL instruction address.
+                        # r_offset is already the ELF virtual address = CLE address.
+                        call_addr = rel['r_offset']
                         if not self.project.is_hooked(call_addr):
                             self.project.hook(call_addr, proc_cls(), length=8)
                             l.info("Hooked sBPF syscall %s at %#x", sym_name, call_addr)

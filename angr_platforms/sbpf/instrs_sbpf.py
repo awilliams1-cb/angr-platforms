@@ -757,17 +757,31 @@ class JsleOp(ConditionalJumpOp):
 
 
 class CallOp(ImmediateSource):
-    """Call function from immediate (syscall dispatch)"""
+    """Call function from immediate.
+
+    In sBPF, CALL computes the target using relative addressing:
+    target = pc + (imm + 1) * 8. Syscall call sites are handled by
+    address-based hooks installed by SimSolana, which fire before
+    the lifter runs — so this always emits Ijk_Call.
+
+    The src_reg field (byte 1 upper nibble) is accepted as any value
+    because Solana binaries use src_reg=1 for both internal and
+    external calls, distinguished only by relocation type.
+    """
 
     name = "call"
+
+    # Accept any src_reg value — Solana uses src_reg=1 for all calls
+    src_reg_bin = "ssss"
 
     operation_bin = "1000"
 
     def compute_result(self: InstructionWithImmediateProtocol):
-        syscall = self.constant(self.immediate, self.size)
-        self.put(syscall, "syscall")
-        ip = self.get("ip", REGISTER_TYPE)
-        self.jump(None, ip + 8, JumpKind.Syscall)
+        # Use self.addr (concrete instruction address) rather than GET(ip),
+        # because GET(ip) returns the block start address which is wrong
+        # when this CALL is not the first instruction in the block.
+        target = self.constant(self.addr + (self.immediate + 1) * 8, REGISTER_TYPE)
+        self.jump(None, target, JumpKind.Call)
 
 
 # LLVM generates these but it's not documented

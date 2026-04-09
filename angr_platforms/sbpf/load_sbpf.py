@@ -29,7 +29,8 @@ class SolanaBPF(ELF):
         from .arch_sbpf import ArchSBPF
         from . import reloc_sbpf  # noqa: F401 — registers relocation handlers
 
-        super().__init__(*args, arch=ArchSBPF(), **kwargs)
+        kwargs.setdefault("arch", ArchSBPF())
+        super().__init__(*args, **kwargs)
         self.os = "SolanaBPF"
 
 
