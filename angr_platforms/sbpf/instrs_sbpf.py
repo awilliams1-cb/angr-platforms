@@ -786,18 +786,24 @@ class CallOp(ImmediateSource):
 
 # LLVM generates these but it's not documented
 class CallXOp(WithImmediate, RegisterSource):
-    """Call function from register"""
+    """Indirect call: CALLX R[imm].
+
+    The immediate field specifies which register holds the target address
+    (e.g., imm=2 means call the function at the address in R2).
+
+    Note: CALLX targets are inherently unresolvable by static analysis
+    (CFGFast) when the register value comes from runtime data, which is
+    the common case for Rust trait vtable dispatch in Solana programs.
+    See resolve_callx.py for details.
+    """
 
     name = "callx"
 
     operation_bin = "1000"
 
-    def fetch_operands(self: InstructionWithImmediateProtocol):
-        addr = self.constant(self.immediate, Type.int_32)
-        return (self.load(addr, REGISTER_TYPE),)
-
-    def compute_result(self: InstructionProtocol, addr):
-        self.jump(None, addr, JumpKind.Call)
+    def compute_result(self: InstructionWithImmediateProtocol):
+        target = self.get(self.immediate, REGISTER_TYPE)
+        self.jump(None, target, JumpKind.Call)
 
 
 #
