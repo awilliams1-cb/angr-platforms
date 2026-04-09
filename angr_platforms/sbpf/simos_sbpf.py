@@ -111,9 +111,10 @@ SOLANA_SYSCALLS = {
 syscall_lib = SimSyscallLibrary()
 syscall_lib.set_library_names("SolanaBPF")
 syscall_lib.add_all_from_dict({name: cls for name, (_, cls) in SOLANA_SYSCALLS.items()})
-syscall_lib.add_number_mapping_from_dict(
-    "solana", {hash_val: name for name, (hash_val, _) in SOLANA_SYSCALLS.items()}
-)
+# Number mapping is populated dynamically in configure_project from ELF relocations.
+# Each call-site address is mapped to its symbol name. We initialize an empty
+# mapping here so the ABI exists when configure_project runs.
+syscall_lib.add_number_mapping_from_dict("solana", {})
 
 
 # Solana memory layout constants
@@ -136,19 +137,22 @@ class SimSolana(SimUserland):
 
     def configure_project(self):
         super().configure_project(abi_list=["solana"])
-        self._hook_syscalls_from_relocations()
+        self._register_syscalls_from_relocations()
 
-    def _hook_syscalls_from_relocations(self):
-        """Hook CALL instruction sites that reference known syscall symbols.
+    def _register_syscalls_from_relocations(self):
+        """Register syscall mappings from type-10 ELF relocations.
 
-        sBPF binaries use R_BPF_64_32 (type 10) relocations to mark CALL
-        instructions that target external symbols (syscalls). We read these
-        relocations and hook each call site with the corresponding SimProcedure.
+        sBPF CALL instructions with imm=-1 are syscalls. The lifter emits
+        Ijk_Sys_syscall with the call-site address as the syscall number.
+        This method reads type-10 relocations to map each call-site address
+        to the corresponding SimProcedure via the syscall library.
+
+        This approach avoids hooking CALL instruction addresses, which would
+        cause CFGFast to split functions at every syscall call site.
         """
         import logging
         l = logging.getLogger(__name__)
 
-        # Build symbol name -> SimProcedure class mapping
         name_to_proc = {name: cls for name, (_, cls) in SOLANA_SYSCALLS.items()}
 
         main_obj = self.project.loader.main_object
@@ -160,6 +164,9 @@ class SimSolana(SimUserland):
 
         if not hasattr(main_obj, 'binary'):
             return
+
+        # Build a mapping of {call_site_addr: proc_name} for the syscall library
+        addr_to_name = {}
 
         try:
             with open(main_obj.binary, 'rb') as f:
@@ -173,33 +180,43 @@ class SimSolana(SimUserland):
                         continue
                     symtab = elf.get_section(sec['sh_link'])
                     for rel in sec.iter_relocations():
-                        if rel['r_info_type'] != 10:  # R_BPF_64_32
+                        if rel['r_info_type'] != 10:
                             continue
                         sym = symtab.get_symbol(rel['r_info_sym'])
                         if sym is None or not sym.name:
                             continue
                         sym_name = sym.name
-                        # Map to SimProcedure
-                        proc_cls = name_to_proc.get(sym_name)
-                        if proc_cls is None:
-                            # Try with trailing underscore variants
-                            proc_cls = name_to_proc.get(sym_name + "_")
-                            if proc_cls is None:
-                                # Check for rust-style variant (sol_invoke_signed_rust -> sol_invoke_signed_c)
-                                if sym_name == "sol_invoke_signed_rust":
-                                    proc_cls = name_to_proc.get("sol_invoke_signed_c")
-                        if proc_cls is None:
+
+                        # Resolve to a SimProcedure name in our library
+                        proc_name = None
+                        if sym_name in name_to_proc:
+                            proc_name = sym_name
+                        elif sym_name + "_" in name_to_proc:
+                            proc_name = sym_name + "_"
+                        elif sym_name == "sol_invoke_signed_rust":
+                            proc_name = "sol_invoke_signed_c"
+
+                        if proc_name is None:
                             l.debug("No SimProcedure for sBPF symbol: %s", sym_name)
                             continue
 
-                        # Hook the CALL instruction address.
-                        # r_offset is already the ELF virtual address = CLE address.
                         call_addr = rel['r_offset']
-                        if not self.project.is_hooked(call_addr):
-                            self.project.hook(call_addr, proc_cls(), length=8)
-                            l.info("Hooked sBPF syscall %s at %#x", sym_name, call_addr)
+                        addr_to_name[call_addr] = proc_name
+                        l.info("Registered syscall %s at call site %#x", sym_name, call_addr)
+
         except Exception as e:
-            l.warning("Failed to process sBPF relocations for syscall hooking: %s", e)
+            l.warning("Failed to process sBPF relocations: %s", e)
+            return
+
+        if not addr_to_name:
+            return
+
+        # Add call-site address → procedure name mappings to the syscall library.
+        # The lifter stores self.addr in the syscall register for imm=-1 calls.
+        syscall_lib.add_number_mapping_from_dict(
+            "solana",
+            {addr: name for addr, name in addr_to_name.items()},
+        )
 
     def state_blank(self, *args, **kwargs):
         state = super().state_blank(*args, **kwargs)

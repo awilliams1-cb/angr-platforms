@@ -759,14 +759,16 @@ class JsleOp(ConditionalJumpOp):
 class CallOp(ImmediateSource):
     """Call function from immediate.
 
-    In sBPF, CALL computes the target using relative addressing:
-    target = pc + (imm + 1) * 8. Syscall call sites are handled by
-    address-based hooks installed by SimSolana, which fire before
-    the lifter runs — so this always emits Ijk_Call.
+    Distinguishes internal calls from syscalls using the immediate value:
+    - imm == -1 (0xFFFFFFFF): Unresolved external call (syscall). The linker
+      sets imm=-1 for symbols resolved at load time via type-10 relocations.
+      Emits Ijk_Sys_syscall with the call-site address as the syscall number,
+      which SimSolana maps to the correct SimProcedure.
+    - imm != -1: Internal function call. Computes target using relative
+      addressing: target = pc + (imm + 1) * 8. Emits Ijk_Call.
 
-    The src_reg field (byte 1 upper nibble) is accepted as any value
-    because Solana binaries use src_reg=1 for both internal and
-    external calls, distinguished only by relocation type.
+    The src_reg field is accepted as any value because Solana binaries use
+    src_reg=1 for both internal and external calls.
     """
 
     name = "call"
@@ -777,11 +779,18 @@ class CallOp(ImmediateSource):
     operation_bin = "1000"
 
     def compute_result(self: InstructionWithImmediateProtocol):
-        # Use self.addr (concrete instruction address) rather than GET(ip),
-        # because GET(ip) returns the block start address which is wrong
-        # when this CALL is not the first instruction in the block.
-        target = self.constant(self.addr + (self.immediate + 1) * 8, REGISTER_TYPE)
-        self.jump(None, target, JumpKind.Call)
+        if self.immediate == -1:
+            # Syscall: unresolved external call (linker placeholder imm=-1).
+            # Store call-site address as syscall number for dispatch.
+            syscall_id = self.constant(self.addr, REGISTER_TYPE)
+            self.put(syscall_id, "syscall")
+            ret_addr = self.constant(self.addr + 8, REGISTER_TYPE)
+            self.put(ret_addr, "ip_at_syscall")
+            self.jump(None, ret_addr, JumpKind.Syscall)
+        else:
+            # Internal call: compute target from relative offset.
+            target = self.constant(self.addr + (self.immediate + 1) * 8, REGISTER_TYPE)
+            self.jump(None, target, JumpKind.Call)
 
 
 # LLVM generates these but it's not documented

@@ -249,8 +249,9 @@ class AnchorIDL:
         """Apply IDL information to an angr project's CFG.
 
         - Finds instruction handlers and renames their functions
+        - Follows continuation functions through syscall hooks
         - Stores the IDL on the project for later use
-        - Returns the handler mapping
+        - Returns the handler mapping (including continuations)
 
         Usage:
             idl = AnchorIDL.from_file("idl.json")
@@ -258,13 +259,34 @@ class AnchorIDL:
         """
         handlers = self.find_handlers(proj, cfg)
 
-        # Rename functions
-        for addr, ix in handlers.items():
+        # Rename handler stub functions and find continuations.
+        # Anchor handlers typically: stub (setup + sol_log_) → continuation (real logic).
+        # The SolLog hook breaks the CFG edge, so the continuation is a separate function
+        # at hook_addr + 8. We trace through hooks to find and rename continuations.
+        hooked = set(proj._sim_procedures.keys())
+        continuations = {}
+
+        for addr, ix in list(handlers.items()):
             func = cfg.kb.functions.get(addr)
-            if func is not None:
-                old_name = func.name
-                func.name = f"ix_{ix.name}"
-                l.info("Renamed %s -> ix_%s at %#x", old_name, ix.name, addr)
+            if func is None:
+                continue
+
+            func.name = f"ix_{ix.name}"
+            l.info("Renamed %s -> ix_%s at %#x", func.name, ix.name, addr)
+
+            # Trace through hooked edges to find continuation functions
+            self._find_continuations(
+                cfg, func, ix, hooked, continuations, depth=0
+            )
+
+        # Add continuations to handlers and rename them
+        for cont_addr, (ix, depth) in continuations.items():
+            cont_func = cfg.kb.functions.get(cont_addr)
+            if cont_func is not None and cont_func.name.startswith("sub_"):
+                cont_func.name = f"ix_{ix.name}_impl{'_' + str(depth) if depth > 1 else ''}"
+                handlers[cont_addr] = ix
+                l.info("Renamed continuation %s at %#x (depth %d)",
+                       cont_func.name, cont_addr, depth)
 
         # Store IDL on the project for later use
         if not hasattr(proj, '_anchor_idls'):
@@ -272,6 +294,31 @@ class AnchorIDL:
         proj._anchor_idls.append(self)
 
         return handlers
+
+    def _find_continuations(self, cfg, func, ix, hooked, continuations, depth):
+        """Trace through hooks to find continuation functions."""
+        if depth > 5:
+            return
+
+        # Find edges from this function to hooked addresses
+        for src, dst, data in cfg.graph.edges(data=True):
+            if src.function_address != func.addr:
+                continue
+            if dst.addr not in hooked:
+                continue
+
+            # After the hook (8 bytes), there's a continuation
+            cont_addr = dst.addr + 8
+            cont_func = cfg.kb.functions.get(cont_addr)
+            if cont_func is None or cont_addr in continuations:
+                continue
+
+            continuations[cont_addr] = (ix, depth + 1)
+
+            # Recurse: the continuation might also hit hooks
+            self._find_continuations(
+                cfg, cont_func, ix, hooked, continuations, depth + 1
+            )
 
     def summary(self):
         """Return a human-readable summary of the IDL."""
