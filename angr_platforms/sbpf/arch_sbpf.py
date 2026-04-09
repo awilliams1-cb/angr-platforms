@@ -44,6 +44,11 @@ class ArchSBPF(Arch):
         Register(name="syscall", vex_offset=88, size=8, artificial=True),
         Register(name="ip", vex_offset=96, size=8),
         Register(name="ip_at_syscall", vex_offset=104, size=8, artificial=True),
+        # Guard registers to cover the full 4-bit register field (indices 14-15)
+        # so the lifter doesn't crash on invalid encodings or data misinterpreted
+        # as instructions.
+        Register(name="_reserved14", vex_offset=112, size=8, artificial=True),
+        Register(name="_reserved15", vex_offset=120, size=8, artificial=True),
     ]
     bp_offset = RegisterOffset(80)
     ret_offset = RegisterOffset(0)       # R0 — return value register

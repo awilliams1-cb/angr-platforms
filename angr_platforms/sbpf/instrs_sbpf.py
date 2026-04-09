@@ -1013,18 +1013,38 @@ class LoadInRegisterOp(
 
 
 class Load64Imm(
-    WithImmediate,
     DoubleWord,
     ImmediateMode,
     LoadNonStandardInstruction,
 ):
-    """Load into register from immediate (16-byte instruction)"""
+    """Load 64-bit immediate into register (16-byte instruction: lddw).
 
-    immediate_bin = "0" * 32 + "i" * 64
+    Encoding: two 8-byte slots. The 64-bit immediate is split:
+      - imm_lo: bytes 4-7 of slot 1 (lower 32 bits)
+      - imm_hi: bytes 12-15 of slot 2 (upper 32 bits)
+      - bytes 8-11 of slot 2 are reserved (opcode/regs/offset, should be 0)
+
+    The src_reg field is used by the linker to indicate relocation type
+    (0=normal, 1=map_fd, etc.). We accept any value.
+    """
+
+    # Accept any src_reg — linker uses it for relocation markers
+    src_reg_bin = "ssss"
+
+    # Capture imm_lo (bytes 4-7) and imm_hi (bytes 12-15).
+    # The second slot header (bytes 8-11) must be zero to distinguish real
+    # lddw from false matches.
+    immediate_bin = "l" * 32 + "0" * 32 + "h" * 32
 
     @property
     def name(self) -> str:
         return f"ld{self.width_name}"
+
+    @property
+    def immediate(self) -> int:
+        lo = bitstring.Bits(bin=self.data["l"]).uintle
+        hi = bitstring.Bits(bin=self.data["h"]).uintle
+        return (hi << 32) | lo
 
     def compute_result(self):
         return self.constant(self.immediate, Type.int_64)
