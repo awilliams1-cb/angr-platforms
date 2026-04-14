@@ -15,8 +15,10 @@ Usage:
     idl.apply(proj, cfg)  # annotates functions with instruction names
 """
 
+import hashlib
 import json
 import logging
+import re
 import struct
 
 l = logging.getLogger(__name__)
@@ -109,7 +111,7 @@ class AnchorIDL:
         instructions = [
             AnchorInstruction(
                 name=ix["name"],
-                discriminator=ix["discriminator"],
+                discriminator=ix.get("discriminator") or _compute_discriminator(ix["name"]),
                 accounts=ix.get("accounts", []),
                 args=ix.get("args", []),
                 docs=ix.get("docs", []),
@@ -336,6 +338,21 @@ class AnchorIDL:
         for err in self.errors:
             lines.append(f"  {err.code}: {err.name}")
         return "\n".join(lines)
+
+
+def _camel_to_snake(name):
+    """Convert camelCase to snake_case (e.g. 'adminSetCreator' -> 'admin_set_creator')."""
+    return re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", name).lower()
+
+
+def _compute_discriminator(name):
+    """Compute the Anchor discriminator for an instruction name.
+
+    Pre-0.30 Anchor IDLs omit explicit discriminators.  The canonical
+    discriminator is sha256("global:<snake_case_name>")[0:8].
+    """
+    snake = _camel_to_snake(name)
+    return list(hashlib.sha256(f"global:{snake}".encode()).digest()[:8])
 
 
 def _type_str(t):
