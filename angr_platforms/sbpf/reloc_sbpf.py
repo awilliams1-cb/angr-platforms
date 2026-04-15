@@ -72,28 +72,54 @@ class R_BPF_64_NODYLD32(BPFImmRelocMixin, ELFReloc):
         return (self.resolvedby.rebased_addr + self.addend) & 0xFFFFFFFF
 
 
-class R_BPF_64_RELATIVE(BPFImmRelocMixin, ELFReloc):
+class R_BPF_64_RELATIVE(ELFReloc):
     """Type 8: Relative relocation (Solana-specific).
 
-    Used for lddw data references that need load-base adjustment.
-    Patches the 32-bit immediate field: new_imm = mapped_base + old_imm.
+    Handles both instruction and data relocations:
+    - In .text (lddw instructions): patches the 32-bit immediate at offset+4.
+    - In data sections (.data.rel.ro vtable entries): patches the full 64-bit
+      value so that ldxdw loads a valid function pointer.
+
+    In both cases the addend is read from bytes 4-7 (the 32-bit imm field
+    of the lddw layout that the Solana linker uses uniformly).
     """
 
     AUTO_HANDLE_NONE = True
 
     def __init__(self, owner, symbol, relative_addr, addend=None):
         if addend is None:
-            # For REL entries, read the 32-bit immediate as the addend
-            # instead of the default 8-byte word read
+            # Addend is always in bytes 4-7 (lddw imm layout), even for data
             data = owner.memory.load(relative_addr + 4, 4)
             addend = struct.unpack("<i", data)[0]
         super().__init__(owner, symbol, relative_addr, addend=addend)
+        # Check if this reloc targets an executable section (lddw) or data
+        self._is_code = any(
+            sec.is_executable and sec.min_addr <= relative_addr < sec.max_addr
+            for sec in owner.sections
+        )
 
     @property
     def value(self):
         if self.resolvedby is not None:
             return self.resolvedby.rebased_addr
         return self.owner.mapped_base + self.addend
+
+    def relocate(self):
+        if not self.resolved:
+            return False
+        if self._is_code:
+            # lddw instruction: patch 32-bit immediate at offset+4
+            self.owner.memory.store(
+                self.relative_addr + 4,
+                struct.pack("<I", self.value & 0xFFFFFFFF),
+            )
+        else:
+            # Data section: write full 64-bit value so ldxdw reads a valid address
+            self.owner.memory.store(
+                self.relative_addr,
+                struct.pack("<Q", self.value & 0xFFFFFFFFFFFFFFFF),
+            )
+        return True
 
 
 class R_BPF_64_32(ELFReloc):
