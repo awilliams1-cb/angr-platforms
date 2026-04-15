@@ -228,22 +228,32 @@ class AnchorIDL:
                     # Scan forward from the branch target for the first CALL
                     # to find the actual handler function.
                     bt_rel = branch_target - base
+                    text_end = base + len(data)
                     if 0 <= bt_rel < len(data) - 80:
                         for j in range(bt_rel, min(bt_rel + 80, len(data) - 8), 8):
                             if data[j] == 0x85:  # CALL
                                 call_addr = base + j
                                 imm = struct.unpack("<i", data[j + 4:j + 8])[0]
                                 target = call_addr + (imm + 1) * 8
-                                if cfg is not None and target in cfg.kb.functions:
-                                    handlers[target] = ix
-                                    l.info("Mapped handler: %s -> %#x", ix.name, target)
+                                if not (base <= target < text_end and target % 8 == 0):
+                                    break
+                                handlers[target] = ix
+                                l.info("Mapped handler: %s -> %#x", ix.name, target)
+                                # If CFGFast missed this as a function start,
+                                # register it now so the rest of the pipeline
+                                # (renaming, continuation tracing) works.
+                                if cfg is not None and target not in cfg.kb.functions:
+                                    cfg.kb.functions.function(addr=target)
+                                    l.info("  Registered missing function at %#x", target)
                                 break
                     else:
                         # Branch target might itself be a handler function
-                        if cfg is not None and branch_target in cfg.kb.functions:
+                        if base <= branch_target < text_end:
                             handlers[branch_target] = ix
                             l.info("Mapped handler (direct): %s -> %#x",
                                    ix.name, branch_target)
+                            if cfg is not None and branch_target not in cfg.kb.functions:
+                                cfg.kb.functions.function(addr=branch_target)
 
         return handlers
 
