@@ -831,7 +831,13 @@ class Ja64(WithOffset, FetchPC, Jump64Instruction):
 
 
 class Exit64(Jump64Instruction):
-    """Exit"""
+    """Exit — sBPF function return.
+
+    Pops the return address from the internal call stack and jumps to it.
+    Semantically equivalent to RET on other architectures.  Using Ijk_Ret
+    (not Ijk_Exit) so that CFGFast knows the function returns to its
+    caller and creates return-continuation edges after CALL sites.
+    """
 
     name = "exit"
 
@@ -839,7 +845,7 @@ class Exit64(Jump64Instruction):
     operation_bin = "1001"
 
     def compute_result(self):
-        self.jump(None, 0, JumpKind.Exit)  # irrelevant addr
+        self.jump(None, self.constant(0, REGISTER_TYPE), JumpKind.Ret)
 
 
 Jump = (
