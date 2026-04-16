@@ -138,6 +138,58 @@ class SimSolana(SimUserland):
     def configure_project(self):
         super().configure_project(abi_list=["solana"])
         self._register_syscalls_from_relocations()
+        self._preregister_call_targets()
+
+    def _preregister_call_targets(self):
+        """Pre-register all internal CALL targets as returning functions.
+
+        sBPF functions always return via EXIT (Ijk_Ret).  CFGFast determines
+        ``returning`` status *after* analyzing each function, but fragmented
+        functions that lack an EXIT block get marked ``returning=False``,
+        which prevents CFGFast from creating return-continuation edges at
+        call sites.  This cascades: callers of "non-returning" functions
+        also get marked non-returning, fragmenting the entire CFG.
+
+        By pre-registering every CALL target with ``returning=True`` before
+        CFGFast runs, ``_is_call_returning()`` immediately returns ``True``,
+        FakeRet edges are created at every call site, and
+        ``_analyze_function_features`` skips functions whose returning status
+        is already determined — so the ``True`` persists.
+        """
+        import struct
+        l = __import__("logging").getLogger(__name__)
+
+        main_obj = self.project.loader.main_object
+        text_sec = main_obj.sections_map.get(".text")
+        if text_sec is None:
+            return
+
+        try:
+            raw = self.project.loader.memory.load(
+                text_sec.min_addr, text_sec.max_addr - text_sec.min_addr,
+            )
+        except Exception:
+            return
+
+        call_targets = set()
+        for i in range(0, len(raw) - 7, 8):
+            if raw[i] == 0x85:  # CALL
+                imm = struct.unpack("<i", raw[i + 4:i + 8])[0]
+                if imm == -1:  # syscall
+                    continue
+                target = text_sec.min_addr + i + (imm + 1) * 8
+                if text_sec.min_addr <= target < text_sec.max_addr:
+                    call_targets.add(target)
+
+        # Also include the entry point
+        call_targets.add(self.project.entry)
+
+        for target in call_targets:
+            func = self.project.kb.functions.function(addr=target, create=True)
+            if func is not None:
+                func.returning = True
+
+        l.info("Pre-registered %d CALL targets as returning functions", len(call_targets))
 
     def _register_syscalls_from_relocations(self):
         """Register syscall mappings from type-10 ELF relocations.
