@@ -147,18 +147,20 @@ def merge_function_fragments(proj, cfg):
         merged_count += 1
 
     # ── Step 4: fix up returning status ────────────────────────
-    # After merging, some parent functions now contain EXIT blocks
-    # that they didn't have before.  Re-check has_return.
+    # After merging, parent functions now contain EXIT blocks that
+    # they didn't have before.  sBPF EXIT is the only return
+    # mechanism, but the lifter emits Ijk_Exit (not Ijk_Ret) since
+    # EXIT doubles as program termination when the call stack is
+    # empty.  Both jumpkinds indicate the function returns.
     for addr in real_sorted:
         func = functions.get(addr)
         if func is None:
             continue
         if func.returning is not True:
-            # Check if any block ends with Ijk_Ret
             for block in func.blocks:
                 try:
                     irsb = proj.factory.block(block.addr, size=block.size).vex
-                    if irsb.jumpkind == "Ijk_Ret":
+                    if irsb.jumpkind in ("Ijk_Ret", "Ijk_Exit"):
                         func.returning = True
                         break
                 except Exception:
