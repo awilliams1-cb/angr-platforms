@@ -146,12 +146,82 @@ def merge_function_fragments(proj, cfg):
 
         merged_count += 1
 
-    # ── Step 4: fix up returning status ────────────────────────
-    # After merging, parent functions now contain EXIT blocks that
-    # they didn't have before.  sBPF EXIT is the only return
-    # mechanism, but the lifter emits Ijk_Exit (not Ijk_Ret) since
-    # EXIT doubles as program termination when the call stack is
-    # empty.  Both jumpkinds indicate the function returns.
+    # ── Step 4: recover orphaned blocks ──────────────────────────
+    # CFGFast sometimes fails to trace fall-through blocks (the race
+    # condition leaves them unassigned to any function).  For each
+    # function whose last block falls through to an unassigned address,
+    # lift and absorb blocks until we hit EXIT, CALL, or an address
+    # already owned by another function.
+    import pyvex
+
+    assigned = set()
+    for func in functions.values():
+        for block in func.blocks:
+            for off in range(0, block.size, 8):
+                assigned.add(block.addr + off)
+
+    recovered = 0
+    for func in list(functions.values()):
+        # Follow fall-through chains from the function's frontier
+        frontier = set()
+        for block in func.blocks:
+            try:
+                irsb = proj.factory.block(block.addr, size=block.size).vex
+            except Exception:
+                continue
+            if irsb.jumpkind == "Ijk_Boring" and isinstance(
+                irsb.next, pyvex.IRExpr.Const
+            ):
+                target = irsb.next.con.value
+                if target not in assigned and text_sec.min_addr <= target < text_sec.max_addr:
+                    frontier.add(target)
+
+        while frontier:
+            addr = frontier.pop()
+            if addr in assigned:
+                continue
+            # Lift one block at this address
+            try:
+                block = proj.factory.block(addr)
+                irsb = block.vex
+            except Exception:
+                continue
+            if irsb.size == 0:
+                continue
+
+            # Add this block to the function
+            from angr.codenode import BlockNode
+            node = BlockNode(addr, irsb.size, graph=func.transition_graph)
+            func._block_sizes[addr] = irsb.size
+            func._local_blocks[addr] = node
+            func._local_block_addrs.add(addr)
+
+            for off in range(0, irsb.size, 8):
+                assigned.add(addr + off)
+            recovered += 1
+
+            # Follow this block's successors if they're also unassigned
+            if irsb.jumpkind == "Ijk_Boring" and isinstance(
+                irsb.next, pyvex.IRExpr.Const
+            ):
+                succ = irsb.next.con.value
+                if succ not in assigned and text_sec.min_addr <= succ < text_sec.max_addr:
+                    frontier.add(succ)
+            # Also follow conditional branch targets
+            for stmt in irsb.statements:
+                if isinstance(stmt, pyvex.IRStmt.Exit):
+                    if isinstance(stmt.dst, pyvex.IRExpr.Const):
+                        succ = stmt.dst.con.value
+                        if succ not in assigned and text_sec.min_addr <= succ < text_sec.max_addr:
+                            frontier.add(succ)
+
+    if recovered:
+        l.info("Recovered %d orphaned blocks", recovered)
+
+    # ── Step 5: fix up returning status ────────────────────────
+    # sBPF EXIT is the only return mechanism, but the lifter emits
+    # Ijk_Exit (not Ijk_Ret) since EXIT doubles as program termination
+    # when the call stack is empty.  Both jumpkinds indicate return.
     for addr in real_sorted:
         func = functions.get(addr)
         if func is None:

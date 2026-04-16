@@ -92,11 +92,15 @@ class R_BPF_64_RELATIVE(ELFReloc):
             data = owner.memory.load(relative_addr + 4, 4)
             addend = struct.unpack("<i", data)[0]
         super().__init__(owner, symbol, relative_addr, addend=addend)
-        # Check if this reloc targets an executable section (lddw) or data
-        self._is_code = any(
-            sec.is_executable and sec.min_addr <= relative_addr < sec.max_addr
-            for sec in owner.sections
-        )
+        # Determine if this reloc targets a lddw instruction (code) or a
+        # data entry (vtable pointer).  lddw always starts with opcode 0x18.
+        # We check the byte directly rather than using section info because
+        # sections may not be fully populated during early CLE loading.
+        try:
+            opcode = owner.memory.load(relative_addr, 1)[0]
+            self._is_code = opcode == 0x18
+        except Exception:
+            self._is_code = False
 
     @property
     def value(self):
